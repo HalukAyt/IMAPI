@@ -1,50 +1,61 @@
-﻿namespace IMAPI.Controllers;
-
-using IMAPI.Data;
-using IMAPI.Entities;
-using IMAPI.Security;
+﻿using System.Security.Claims;
+using IMAPI.Api.Data;
+using IMAPI.Api.Entities;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System;
+
+
+namespace IMAPI.Api.Controllers;
+
 
 [ApiController]
-[Route("devices")]
 [Authorize]
-public class DevicesController(AppDbContext db, IProtectionService ps, UserManager<AppUser> um) : ControllerBase
+[Route("api/[controller]")]
+public class DevicesController : ControllerBase
 {
-    // Claim code akışı basitleştirilmiş: client bize (DeviceId, ClaimCode) yollar.
-    [HttpPost("claim")]
-    public async Task<IActionResult> Claim([FromBody] ClaimDto dto)
+    private readonly ItechMarineDbContext _db;
+    public DevicesController(ItechMarineDbContext db) { _db = db; }
+    private Guid GetUserId() => Guid.Parse(User.FindFirstValue("uid")!);
+
+
+    // /api/devices?boatId=...
+    [HttpGet]
+    public async Task<ActionResult<List<object>>> List([FromQuery] Guid boatId)
     {
-        var me = await um.GetUserAsync(User);
-        if (me is null) return Unauthorized();
-
-        // DEMO: ClaimCode doğrulaması burada varsayılıyor (örn. siparişle eşleşme)
-        var boat = await db.Boats.FirstOrDefaultAsync(b => b.OwnerId == me.Id);
-        if (boat is null)
-        {
-            boat = new Boat { Name = dto.BoatName ?? "My Boat", OwnerId = me.Id };
-            db.Add(boat);
-        }
-
-        var dev = await db.Devices.FirstOrDefaultAsync(d => d.DeviceId == dto.DeviceId);
-        if (dev is null)
-        {
-            dev = new Device { DeviceId = dto.DeviceId, Boat = boat };
-            // Cihaza özel HMAC secret üret ve korumalı sakla
-            var plain = Guid.NewGuid().ToString("N");
-            dev.ProtectedSecret = ps.Protect(plain);
-            // 8 kanal şablon
-            for (var i = 0; i < 8; i++) dev.RelayChannels.Add(new RelayChannel { Index = i, Name = $"CH{i + 1}", ActiveLow = true });
-            db.Add(dev);
-        }
-        else dev.Boat = boat;
-
-        await db.SaveChangesAsync();
-        return Ok(new { boatId = boat.Id, deviceDbId = dev.Id });
+        var uid = GetUserId();
+        var ok = await _db.Boats.AnyAsync(b => b.Id == boatId && b.OwnerId == uid);
+        if (!ok) return NotFound();
+        var list = await _db.Devices.Where(d => d.BoatId == boatId)
+        .Select(d => new { d.Id, d.Serial, d.LastSeen })
+        .ToListAsync();
+        return Ok(list);
     }
 
-    public record ClaimDto(string DeviceId, string? ClaimCode, string? BoatName);
+
+    // claim device to a boat (serial no ile eşleştirme)
+    public record ClaimDeviceRequest(Guid BoatId, string Serial);
+
+
+    [HttpPost("claim")]
+    public async Task<IActionResult> Claim([FromBody] ClaimDeviceRequest req)
+    {
+        var uid = GetUserId();
+        var boat = await _db.Boats.FirstOrDefaultAsync(b => b.Id == req.BoatId && b.OwnerId == uid);
+        if (boat is null) return NotFound("Boat not found");
+
+
+        var existing = await _db.Devices.FirstOrDefaultAsync(d => d.Serial == req.Serial);
+        if (existing is null)
+        {
+            existing = new Device { Serial = req.Serial, BoatId = boat.Id };
+            _db.Devices.Add(existing);
+        }
+        else
+        {
+            existing.BoatId = boat.Id;
+        }
+        await _db.SaveChangesAsync();
+        return Ok(new { existing.Id, existing.Serial, existing.BoatId });
+    }
 }

@@ -1,11 +1,28 @@
-﻿namespace IMAPI.Entities
+﻿using System.ComponentModel.DataAnnotations;
+
+
+namespace IMAPI.Api.Entities;
+
+
+public class Boat
 {
-    public class Boat
-    {
-        public Guid Id { get; set; } = Guid.NewGuid();
-        public string Name { get; set; } = default!;
-        public string OwnerId { get; set; } = default!; // AppUser.Id
-        public AppUser? Owner { get; set; }
-        public ICollection<Device> Devices { get; set; } = new List<Device>();
-    }
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+
+    [Required, MaxLength(120)]
+    public string Name { get; set; } = default!;
+
+
+    [MaxLength(120)]
+    public string? HullNo { get; set; }
+
+
+    public Guid OwnerId { get; set; }
+    public User Owner { get; set; } = default!;
+
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+
+    public List<Device> Devices { get; set; } = new();
 }

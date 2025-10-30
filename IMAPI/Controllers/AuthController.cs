@@ -1,61 +1,56 @@
-﻿namespace IMAPI.Controllers;
-
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Text;
-using IMAPI.Entities;
-using IMAPI.Security;
+﻿using IMAPI.Api.Data;
+using IMAPI.Api.DTOs;
+using IMAPI.Api.Entities;
+using IMAPI.Api.Services;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.EntityFrameworkCore;
+
+
+namespace ItechMarine.Api.Controllers;
+
 
 [ApiController]
-[Route("auth")]
-public class AuthController(UserManager<AppUser> um, SignInManager<AppUser> sm, IOptions<JwtConfig> jwtOpt) : ControllerBase
+[Route("api/[controller]")]
+public class AuthController : ControllerBase
 {
+    private readonly ItechMarineDbContext _db;
+    private readonly PasswordHasher _hasher;
+    private readonly TokenService _tokens;
+
+
+    public AuthController(ItechMarineDbContext db, PasswordHasher hasher, TokenService tokens)
+    { _db = db; _hasher = hasher; _tokens = tokens; }
+
+    [AllowAnonymous]
     [HttpPost("register")]
-    [AllowAnonymous]
-    public async Task<IActionResult> Register([FromBody] RegisterDto dto)
+    public async Task<ActionResult<AuthResponse>> Register(RegisterRequest req)
     {
-        var user = new AppUser { UserName = dto.Email, Email = dto.Email, DisplayName = dto.DisplayName };
-        var res = await um.CreateAsync(user, dto.Password);
-        if (!res.Succeeded) return BadRequest(res.Errors);
-        return Ok();
+        if (await _db.Users.AnyAsync(u => u.Email == req.Email))
+            return Conflict("Email already registered");
+
+
+        var (hash, salt) = _hasher.HashPassword(req.Password);
+        var user = new User { Email = req.Email, PasswordHash = hash, PasswordSalt = salt, FullName = req.FullName };
+        _db.Users.Add(user);
+        await _db.SaveChangesAsync();
+
+
+        var token = _tokens.CreateToken(user.Id, user.Email);
+        return Ok(new AuthResponse(token, user.Id, user.Email, user.FullName));
     }
 
+    [AllowAnonymous]
     [HttpPost("login")]
-    [AllowAnonymous]
-    public async Task<IActionResult> Login([FromBody] LoginDto dto)
+    public async Task<ActionResult<AuthResponse>> Login(LoginRequest req)
     {
-        var user = await um.FindByEmailAsync(dto.Email);
-        if (user is null) return Unauthorized();
-        var passOk = await sm.CheckPasswordSignInAsync(user, dto.Password, lockoutOnFailure: false);
-        if (!passOk.Succeeded) return Unauthorized();
-        var jwt = IssueJwt(user, jwtOpt.Value);
-        return Ok(new { token = jwt });
-    }
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == req.Email);
+        if (user is null) return Unauthorized("Invalid credentials");
+        if (!_hasher.Verify(req.Password, user.PasswordHash, user.PasswordSalt))
+            return Unauthorized("Invalid credentials");
 
-    private static string IssueJwt(AppUser user, JwtConfig cfg)
-    {
-        var claims = new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id),
-            new Claim(JwtRegisteredClaimNames.Email, user.Email ?? string.Empty),
-            new Claim("name", user.DisplayName ?? user.Email ?? string.Empty)
-        };
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(cfg.Key));
-        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-        var token = new JwtSecurityToken(
-            issuer: cfg.Issuer,
-            audience: cfg.Audience,
-            claims: claims,
-            expires: DateTime.UtcNow.AddMinutes(cfg.AccessTokenMinutes),
-            signingCredentials: creds);
-        return new JwtSecurityTokenHandler().WriteToken(token);
-    }
 
-    public record RegisterDto(string Email, string Password, string? DisplayName);
-    public record LoginDto(string Email, string Password);
+        var token = _tokens.CreateToken(user.Id, user.Email);
+        return Ok(new AuthResponse(token, user.Id, user.Email, user.FullName));
+    }
 }
