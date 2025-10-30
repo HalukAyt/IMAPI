@@ -1,0 +1,6 @@
+@IMAPI_HostAddress = http://localhost:5074
+
+GET {{IMAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
