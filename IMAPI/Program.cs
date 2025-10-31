@@ -8,6 +8,8 @@ using IMAPI.Api.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.Authorization;
+using IMAPI.Api.Hubs;
+
 
 
 
@@ -65,6 +67,14 @@ builder.Services.AddControllers(options =>
 builder.Services.AddSingleton(new TokenService(jwtKey, jwtIssuer, jwtAudience));
 builder.Services.AddSingleton<PasswordHasher>();
 
+// --- MQTT ---
+builder.Services.Configure<MqttOptions>(builder.Configuration.GetSection("Mqtt"));
+builder.Services.AddSingleton<IMqttBridge, MqttBridge>();
+builder.Services.AddHostedService(sp => (MqttBridge)sp.GetRequiredService<IMqttBridge>());
+builder.Services.AddSignalR();                 // StatusHub kullanıyorsan
+
+
+
 
 // --- Swagger ---
 builder.Services.AddEndpointsApiExplorer();
@@ -97,6 +107,12 @@ builder.Services.AddSwaggerGen(c =>
 
 
 var app = builder.Build();
+
+// --- Status Hub ---
+
+
+app.MapHub<StatusHub>("/hubs/status");        // StatusHub varsa
+
 
 
 // --- Pipeline ---

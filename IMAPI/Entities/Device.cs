@@ -22,4 +22,6 @@ public class Device
 
 
     public DateTime? LastSeen { get; set; }
+    public List<LightChannel> LightChannels { get; set; } = new();
+
 }

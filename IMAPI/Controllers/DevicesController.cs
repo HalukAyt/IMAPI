@@ -38,14 +38,13 @@ public class DevicesController : ControllerBase
 
 
     [HttpPost("claim")]
-    public async Task<IActionResult> Claim([FromBody] ClaimDeviceRequest req)
+    public async Task<IActionResult> Claim([FromBody] ClaimDeviceRequest req, CancellationToken ct)
     {
         var uid = GetUserId();
-        var boat = await _db.Boats.FirstOrDefaultAsync(b => b.Id == req.BoatId && b.OwnerId == uid);
+        var boat = await _db.Boats.FirstOrDefaultAsync(b => b.Id == req.BoatId && b.OwnerId == uid, ct);
         if (boat is null) return NotFound("Boat not found");
 
-
-        var existing = await _db.Devices.FirstOrDefaultAsync(d => d.Serial == req.Serial);
+        var existing = await _db.Devices.FirstOrDefaultAsync(d => d.Serial == req.Serial, ct);
         if (existing is null)
         {
             existing = new Device { Serial = req.Serial, BoatId = boat.Id };
@@ -55,7 +54,18 @@ public class DevicesController : ControllerBase
         {
             existing.BoatId = boat.Id;
         }
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
+
+        // 8 kanal seed (yoksa)
+        var hasLights = await _db.LightChannels.AnyAsync(l => l.DeviceId == existing.Id, ct);
+        if (!hasLights)
+        {
+            for (int i = 1; i <= 8; i++)
+                _db.LightChannels.Add(new LightChannel { DeviceId = existing.Id, ChNo = i, Name = $"Light {i}", IsOn = false });
+            await _db.SaveChangesAsync(ct);
+        }
+
         return Ok(new { existing.Id, existing.Serial, existing.BoatId });
     }
+
 }
