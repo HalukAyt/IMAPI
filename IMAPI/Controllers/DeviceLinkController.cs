@@ -1,5 +1,6 @@
 ﻿using IMAPI.Api.Data;
 using IMAPI.Api.Entities;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,6 +18,7 @@ public class DeviceLinkController : ControllerBase
 
     // NOT: Üretimde HMAC imza ekleyin (X-Signature), şimdilik basit.
     [HttpPost("poll")]
+    [AllowAnonymous]
     public async Task<IActionResult> Poll([FromBody] PollReq req, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
@@ -33,6 +35,7 @@ public class DeviceLinkController : ControllerBase
     }
 
     [HttpPost("ack")]
+    [AllowAnonymous]
     public async Task<IActionResult> Ack([FromBody] AckReq req, CancellationToken ct)
     {
         var id = Guid.Parse(req.Id);
