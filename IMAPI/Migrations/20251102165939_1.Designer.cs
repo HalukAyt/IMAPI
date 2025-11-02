@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace IMAPI.Migrations
 {
     [DbContext(typeof(ItechMarineDbContext))]
-    [Migration("20251031063349_pendingCommand")]
-    partial class pendingCommand
+    [Migration("20251102165939_1")]
+    partial class _1
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
