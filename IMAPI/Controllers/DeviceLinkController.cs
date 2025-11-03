@@ -34,48 +34,97 @@ public class DeviceLinkController : ControllerBase
         var now = DateTime.UtcNow;
         var max = Math.Clamp(req.Max ?? 8, 1, 32);
 
-        // delivered HARİÇ her şeyi ver (queued + sent + sent_http), süresi geçmemiş olanlar
+        // Cihazın LastSeen'ini güncelle (HTTP-only cihazlar için online takibi)
+        var device = await _db.Devices.FirstOrDefaultAsync(d => d.Serial == req.Serial, ct);
+        if (device != null)
+        {
+            device.LastSeen = now;
+            await _db.SaveChangesAsync(ct);
+        }
+
+        // HTTP hattından servis edilecek komutlar: queued + sent_http (delivered/sent hariç)
         var items = await _db.PendingCommands
             .Where(x => x.DeviceSerial == req.Serial
                         && x.ExpiresAt > now
-                        && x.Status != "delivered")
+                        && (x.Status == "queued" || x.Status == "sent_http"))
             .OrderBy(x => x.CreatedAt)
             .Take(max)
             .ToListAsync(ct);
 
         if (items.Count == 0)
         {
-            _logger.LogDebug("No pending commands for {serial}", req.Serial);
+            // Cihaz her ihtimale karşı tek tip cevap bekliyor
             return Ok(new { commands = Array.Empty<object>() });
         }
 
-        // HTTP ile servis ettiklerimizi işaretle: queued → sent_http, SentAt now
+        // queued → sent_http; SentAt damgası
         foreach (var pc in items)
         {
-            if (pc.SentAt == null) pc.SentAt = now;
-            if (pc.Status == "queued") pc.Status = "sent_http"; // MQTT ile gitmişse zaten "sent" olarak kalır
+            pc.SentAt ??= now;
+            if (pc.Status == "queued")
+                pc.Status = "sent_http";
         }
         await _db.SaveChangesAsync(ct);
 
-        // Cihaza sade Payload listesi döndür (JSON olarak)
+        // Cihaza sade bir "commands" listesi döndür.
+        // - payload JSON objesi ise direkt gönder
+        // - id yoksa { id, payload: <json> } sarmala
+        // - parse edilemezse { id, payload: "<raw>" } olarak gönder
         var commandList = new List<JsonElement>(items.Count);
+
         foreach (var pc in items)
         {
             try
             {
-                // Payload sütunu string/Jsonb ise aşağıdaki deserialize çalışır
                 var el = JsonSerializer.Deserialize<JsonElement>(pc.Payload);
-                commandList.Add(el);
+
+                if (el.ValueKind == JsonValueKind.Object)
+                {
+                    if (el.TryGetProperty("id", out _))
+                    {
+                        // id zaten payload içinde
+                        commandList.Add(el);
+                    }
+                    else
+                    {
+                        // id yoksa sarmala
+                        var wrappedObj = new
+                        {
+                            id = pc.Id,
+                            payload = el
+                        };
+                        commandList.Add(JsonSerializer.Deserialize<JsonElement>(
+                            JsonSerializer.Serialize(wrappedObj)));
+                    }
+                }
+                else
+                {
+                    // object değilse (array/primitive) sarmala
+                    var wrapped = new
+                    {
+                        id = pc.Id,
+                        payload = el
+                    };
+                    commandList.Add(JsonSerializer.Deserialize<JsonElement>(
+                        JsonSerializer.Serialize(wrapped)));
+                }
             }
             catch
             {
-                // sorunlu payload'ı atla
+                // JSON parse hatası → raw string olarak dön
+                var wrappedRaw = new
+                {
+                    id = pc.Id,
+                    payload = pc.Payload
+                };
+                commandList.Add(JsonSerializer.Deserialize<JsonElement>(
+                    JsonSerializer.Serialize(wrappedRaw)));
             }
         }
 
-        _logger.LogInformation("Served {count} command(s) to {serial}", commandList.Count, req.Serial);
         return Ok(new { commands = commandList });
     }
+
 
     // ------------------------------------------------------------
     // 2) Cihaz komutu işledi → /api/device-link/ack
