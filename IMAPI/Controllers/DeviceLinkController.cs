@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using IMAPI.Api.Data;
-using IMAPI.Api.Entities;
 
 namespace IMAPI.Api.Controllers;
 
@@ -20,9 +19,9 @@ public class DeviceLinkController : ControllerBase
         _logger = logger;
     }
 
-    // ==============================================================
-    // 1️⃣  Cihaz komut çekiyor → /api/device-link/poll
-    // ==============================================================
+    // ------------------------------------------------------------
+    // 1) Cihaz komut çekiyor → /api/device-link/poll
+    // ------------------------------------------------------------
     public record PollReq(string Serial, int? Max);
 
     [HttpPost("poll")]
@@ -35,44 +34,52 @@ public class DeviceLinkController : ControllerBase
         var now = DateTime.UtcNow;
         var max = Math.Clamp(req.Max ?? 8, 1, 32);
 
-        // Henüz gönderilmemiş veya acknowledged olmayan, süresi geçmemiş komutları getir
-        var cmds = await _db.PendingCommands
-            .Where(x => x.DeviceSerial == req.Serial &&
-                        (x.Status == "queued" || x.Status == "delivered") &&
-                        x.ExpiresAt > now)
+        // delivered HARİÇ her şeyi ver (queued + sent + sent_http), süresi geçmemiş olanlar
+        var items = await _db.PendingCommands
+            .Where(x => x.DeviceSerial == req.Serial
+                        && x.ExpiresAt > now
+                        && x.Status != "delivered")
             .OrderBy(x => x.CreatedAt)
             .Take(max)
-            .Select(x => new { x.Id, x.Payload })
             .ToListAsync(ct);
 
-        if (cmds.Count == 0)
+        if (items.Count == 0)
         {
             _logger.LogDebug("No pending commands for {serial}", req.Serial);
             return Ok(new { commands = Array.Empty<object>() });
         }
 
-        // Her komutu “delivered” olarak işaretle
-        foreach (var c in cmds)
+        // HTTP ile servis ettiklerimizi işaretle: queued → sent_http, SentAt now
+        foreach (var pc in items)
         {
-            var pc = await _db.PendingCommands.FirstAsync(x => x.Id == c.Id, ct);
-            pc.Status = "delivered";
-            pc.DeliveredAt = now;
+            if (pc.SentAt == null) pc.SentAt = now;
+            if (pc.Status == "queued") pc.Status = "sent_http"; // MQTT ile gitmişse zaten "sent" olarak kalır
+        }
+        await _db.SaveChangesAsync(ct);
+
+        // Cihaza sade Payload listesi döndür (JSON olarak)
+        var commandList = new List<JsonElement>(items.Count);
+        foreach (var pc in items)
+        {
+            try
+            {
+                // Payload sütunu string/Jsonb ise aşağıdaki deserialize çalışır
+                var el = JsonSerializer.Deserialize<JsonElement>(pc.Payload);
+                commandList.Add(el);
+            }
+            catch
+            {
+                // sorunlu payload'ı atla
+            }
         }
 
-        await _db.SaveChangesAsync(ct);
-        _logger.LogInformation("Delivered {count} command(s) to {serial}", cmds.Count, req.Serial);
-
-        // Cihaza sade JSON döndür
-        var commandList = cmds
-            .Select(c => JsonSerializer.Deserialize<JsonElement>(c.Payload))
-            .ToList();
-
-        return Ok(commandList);
+        _logger.LogInformation("Served {count} command(s) to {serial}", commandList.Count, req.Serial);
+        return Ok(new { commands = commandList });
     }
 
-    // ==============================================================
-    // 2️⃣  Cihaz komutu işledikten sonra → /api/device-link/ack
-    // ==============================================================
+    // ------------------------------------------------------------
+    // 2) Cihaz komutu işledi → /api/device-link/ack
+    // ------------------------------------------------------------
     public record AckReq(string Serial, string Id, bool Ok, string? Reason);
 
     [HttpPost("ack")]
@@ -91,10 +98,10 @@ public class DeviceLinkController : ControllerBase
         if (pc is null)
             return NotFound(new { error = "Command not found" });
 
-        pc.Status = req.Ok ? "acknowledged" : "failed";
         pc.DeliveredAt = DateTime.UtcNow;
+        pc.Status = req.Ok ? "delivered" : "failed";
 
-        if (!string.IsNullOrEmpty(req.Reason))
+        if (!string.IsNullOrWhiteSpace(req.Reason))
             _logger.LogWarning("ACK reason from {serial}: {reason}", req.Serial, req.Reason);
 
         await _db.SaveChangesAsync(ct);
