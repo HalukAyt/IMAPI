@@ -18,7 +18,10 @@ public class LightsController : ControllerBase
     private readonly IMqttBridge _mqtt;
 
     public LightsController(ItechMarineDbContext db, IMqttBridge mqtt)
-    { _db = db; _mqtt = mqtt; }
+    {
+        _db = db;
+        _mqtt = mqtt;
+    }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue("uid")!);
 
@@ -26,7 +29,8 @@ public class LightsController : ControllerBase
     public async Task<ActionResult<List<LightResponse>>> List(Guid deviceId, CancellationToken ct)
     {
         var uid = GetUserId();
-        var dev = await _db.Devices.Include(d => d.Boat).FirstOrDefaultAsync(d => d.Id == deviceId, ct);
+        var dev = await _db.Devices.Include(d => d.Boat)
+            .FirstOrDefaultAsync(d => d.Id == deviceId, ct);
         if (dev is null || dev.Boat.OwnerId != uid) return NotFound();
 
         var lights = await _db.LightChannels
@@ -44,10 +48,12 @@ public class LightsController : ControllerBase
         if (ch < 1 || ch > 32) return BadRequest("invalid channel");
 
         var uid = GetUserId();
-        var dev = await _db.Devices.Include(d => d.Boat).FirstOrDefaultAsync(d => d.Id == deviceId, ct);
+        var dev = await _db.Devices.Include(d => d.Boat)
+            .FirstOrDefaultAsync(d => d.Id == deviceId, ct);
         if (dev is null || dev.Boat.OwnerId != uid) return NotFound();
 
-        var light = await _db.LightChannels.FirstOrDefaultAsync(l => l.DeviceId == deviceId && l.ChNo == ch, ct);
+        var light = await _db.LightChannels
+            .FirstOrDefaultAsync(l => l.DeviceId == deviceId && l.ChNo == ch, ct);
         if (light is null) return NotFound();
 
         int newState;
@@ -64,28 +70,27 @@ public class LightsController : ControllerBase
         {
             id = cmdId,
             type = "light",
-            ch = ch,
+            ch,
             state = newState,
             source = "app",
             expiry = DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeSeconds()
         };
         var payloadJson = System.Text.Json.JsonSerializer.Serialize(payloadObj);
 
-        // 1) Önce kuyrukla
+        // 1️⃣ PendingCommands kuyruğuna ekle
         _db.PendingCommands.Add(new PendingCommand
         {
             Id = Guid.NewGuid(),
             DeviceId = dev.Id,
             DeviceSerial = dev.Serial,
             Payload = payloadJson,
-            Status = "queued",
-            CreatedAt = DateTime.UtcNow,          // ✅ eklendi
-            ExpiresAt = DateTime.UtcNow.AddMinutes(2)
+            Status = "queued",                  // ✅ ESP bu statüyü görür
+            CreatedAt = DateTime.UtcNow,        // ✅ sıralama için
+            ExpiresAt = DateTime.UtcNow.AddMinutes(10) // ✅ uzun ömür
         });
-
         await _db.SaveChangesAsync(ct);
 
-        // 2) MQTT dene (başarırsa 'sent' olarak işaretle)
+        // 2️⃣ MQTT dene (başarırsa 'sent_http' olarak işaretle)
         try
         {
             await _mqtt.PublishCommandAsync(dev.Serial, payloadObj, ct);
@@ -94,21 +99,20 @@ public class LightsController : ControllerBase
                 .OrderByDescending(x => x.CreatedAt)
                 .FirstAsync(x => x.DeviceSerial == dev.Serial && x.Payload == payloadJson, ct);
 
-            pc.Status = "sent";
+            pc.Status = "sent_http";           // ✅ HTTP fallback için görünür
             pc.SentAt = DateTime.UtcNow;
             await _db.SaveChangesAsync(ct);
         }
         catch
         {
-            // MQTT yoksa sessiz: cihaz HTTP ile poll edip bu komutu alacak
+            // MQTT başarısızsa sessizce geç; cihaz HTTP ile poll edip alacak
         }
 
-        // 3) Optimistic update (ACK gelince yine güncellenecek)
+        // 3️⃣ Optimistic update (ACK geldiğinde yeniden güncellenecek)
         light.IsOn = newState == 1;
         light.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(ct);
 
         return Ok(new { id = cmdId, queued = true, ch, state = newState });
     }
-
 }
