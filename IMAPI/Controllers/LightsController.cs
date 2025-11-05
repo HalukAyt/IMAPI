@@ -74,12 +74,15 @@ public class LightsController : ControllerBase
         // 1) Önce kuyrukla
         _db.PendingCommands.Add(new PendingCommand
         {
+            Id = Guid.NewGuid(),
             DeviceId = dev.Id,
             DeviceSerial = dev.Serial,
             Payload = payloadJson,
             Status = "queued",
+            CreatedAt = DateTime.UtcNow,          // ✅ eklendi
             ExpiresAt = DateTime.UtcNow.AddMinutes(2)
         });
+
         await _db.SaveChangesAsync(ct);
 
         // 2) MQTT dene (başarırsa 'sent' olarak işaretle)
