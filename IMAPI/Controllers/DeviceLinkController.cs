@@ -34,57 +34,95 @@ public class DeviceLinkController : ControllerBase
         var now = DateTime.UtcNow;
         var max = Math.Clamp(req.Max ?? 8, 1, 32);
 
+        // Cihazın LastSeen'ini güncelle (HTTP-only cihazlar için online takibi)
+        var device = await _db.Devices.FirstOrDefaultAsync(d => d.Serial == req.Serial, ct);
+        if (device != null)
+        {
+            device.LastSeen = now;
+            await _db.SaveChangesAsync(ct);
+        }
+
+        // HTTP hattından servis edilecek komutlar: queued + sent_http (delivered/sent hariç)
         var items = await _db.PendingCommands
             .Where(x => x.DeviceSerial == req.Serial
                         && x.ExpiresAt > now
-                        && x.Status != "delivered")
+                        && (x.Status == "queued" || x.Status == "sent_http"))
             .OrderBy(x => x.CreatedAt)
             .Take(max)
             .ToListAsync(ct);
 
         if (items.Count == 0)
+        {
+            // Cihaz her ihtimale karşı tek tip cevap bekliyor
             return Ok(new { commands = Array.Empty<object>() });
+        }
 
-        // queued -> sent_http (HTTP ile servis edildiğini işaretle)
+        // queued → sent_http; SentAt damgası
         foreach (var pc in items)
         {
             pc.SentAt ??= now;
-            if (pc.Status == "queued") pc.Status = "sent_http";
+            if (pc.Status == "queued")
+                pc.Status = "sent_http";
         }
         await _db.SaveChangesAsync(ct);
 
-        // DÖNÜŞ: her komutta id + payload birlikte
-        var commands = new List<object>(items.Count);
+        // Cihaza sade bir "commands" listesi döndür.
+        // - payload JSON objesi ise direkt gönder
+        // - id yoksa { id, payload: <json> } sarmala
+        // - parse edilemezse { id, payload: "<raw>" } olarak gönder
+        var commandList = new List<JsonElement>(items.Count);
+
         foreach (var pc in items)
         {
             try
             {
-                using var doc = JsonDocument.Parse(pc.Payload); // payload JSON ise
-                                                                // payload zaten bir obje ise düz gövdeyi döndür (id ekleyerek)
-                if (doc.RootElement.ValueKind == JsonValueKind.Object)
-                {
-                    // payload objesini alıp "id" alanını inject edelim
-                    var dict = new Dictionary<string, object?>();
-                    foreach (var p in doc.RootElement.EnumerateObject())
-                        dict[p.Name] = p.Value.ValueKind == JsonValueKind.Null ? null : JsonSerializer.Deserialize<object>(p.Value.GetRawText());
+                var el = JsonSerializer.Deserialize<JsonElement>(pc.Payload);
 
-                    dict["id"] = pc.Id; // <-- KRİTİK
-                    commands.Add(dict);
+                if (el.ValueKind == JsonValueKind.Object)
+                {
+                    if (el.TryGetProperty("id", out _))
+                    {
+                        // id zaten payload içinde
+                        commandList.Add(el);
+                    }
+                    else
+                    {
+                        // id yoksa sarmala
+                        var wrappedObj = new
+                        {
+                            id = pc.Id,
+                            payload = el
+                        };
+                        commandList.Add(JsonSerializer.Deserialize<JsonElement>(
+                            JsonSerializer.Serialize(wrappedObj)));
+                    }
                 }
                 else
                 {
-                    // payload obje değilse, sarmala
-                    commands.Add(new { id = pc.Id, payload = JsonSerializer.Deserialize<object>(pc.Payload) });
+                    // object değilse (array/primitive) sarmala
+                    var wrapped = new
+                    {
+                        id = pc.Id,
+                        payload = el
+                    };
+                    commandList.Add(JsonSerializer.Deserialize<JsonElement>(
+                        JsonSerializer.Serialize(wrapped)));
                 }
             }
             catch
             {
-                // JSON değilse string olarak sarmala
-                commands.Add(new { id = pc.Id, payload = pc.Payload });
+                // JSON parse hatası → raw string olarak dön
+                var wrappedRaw = new
+                {
+                    id = pc.Id,
+                    payload = pc.Payload
+                };
+                commandList.Add(JsonSerializer.Deserialize<JsonElement>(
+                    JsonSerializer.Serialize(wrappedRaw)));
             }
         }
 
-        return Ok(new { commands });
+        return Ok(new { commands = commandList });
     }
 
 
